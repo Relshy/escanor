@@ -6,8 +6,8 @@
 
 
 	WHAT IT DOES
-	Hold E (Compress variant) or V (Giant variant) to charge a Rhitta-style
-	fireball in front of the character. Release the key to launch it toward the
+	Hold E (Compress variant) or V (Giant variant) to charge a
+	fireball. Release the key to launch it toward the
 	mouse cursor. On impact it spawns a charge-scaled explosion, deals radial
 	falloff damage, and shakes nearby cameras.
 
