@@ -2,7 +2,7 @@
 --[[
 Author(s)    @sillyrelshy
 Date         12/07/26
-Version      1.0.0
+Version      1.1.0
 ]]
 
 
@@ -30,7 +30,7 @@ local ProjectileController  = require(modulesFolder:WaitForChild("ProjectileCont
 
 local sunTemplate       = assetsFolder:WaitForChild("CruelSunProjectileVFX") :: BasePart
 local castStartedSignal = signalsFolder:WaitForChild("CastStarted") :: BindableEvent
-local castEndedSignal   = signalsFolder:WaitForChild("CastEnded") :: BindableEvent
+local castReleasedSignal = signalsFolder:WaitForChild("CastReleased") :: BindableEvent
 
 
 local CruelSun = {}
@@ -228,15 +228,16 @@ end
 --[[
 @param     Controller     self       | The ability synchronizing the animation.
 @param     CastSession    session    | The active cast session.
-@return    void
+@return    boolean
 
 Advances the paused cast animation until the authored launch moment is reached.
+Returns false when the held sun becomes invalid during either yielding stage.
 ]]
-function CruelSun._playCastAnimation(self: Controller, session: CastSession)
+function CruelSun._playCastAnimation(self: Controller, session: CastSession): boolean
 	local track = session.CastTrack
 
 	if not track then
-		return
+		return true
 	end
 
 	self.Character:StopCompetingAnimations(track, CONFIG.CastFadeTime)
@@ -254,7 +255,7 @@ function CruelSun._playCastAnimation(self: Controller, session: CastSession)
 
 	while track.Length <= 0 and os.clock() < lengthDeadline do
 		if not self:_setChargeScale(session, session.CurrentScale, 1.45) then
-			return
+			return false
 		end
 
 		RunService.Heartbeat:Wait()
@@ -267,11 +268,13 @@ function CruelSun._playCastAnimation(self: Controller, session: CastSession)
 
 	while track.TimePosition < launchTime and os.clock() < deadline do
 		if not self:_setChargeScale(session, session.CurrentScale, 1.45) then
-			return
+			return false
 		end
 
 		RunService.Heartbeat:Wait()
 	end
+
+	return true
 end
 
 
@@ -283,41 +286,66 @@ end
 Releases sounds, visuals, movement, and temporary character state on every exit path.
 ]]
 function CruelSun._cleanup(self: Controller, session: CastSession?)
-	if session then
-		self.Effects:FadeSound(session.ChargingSound, 0.1)
-		self.Effects:FadeSound(session.CrackleSound, 0.15)
+	local failures: {string} = {}
 
-		if session.CastTrack and session.CastTrack.IsPlaying then
-			session.CastTrack:Stop(0.05)
-		end
+	local function runStage(label: string, callback: () -> ())
+		local succeeded, failure = xpcall(callback, debug.traceback)
 
-		if session.Sun.Parent then
-			session.Sun:Destroy()
+		if not succeeded then
+			table.insert(failures, `{label}:\n{failure}`)
 		end
 	end
 
-	self.Character:CleanupCast()
-	self.Character:UnlockMovement()
+	runStage("presentation cleanup", function()
+		if session then
+			self.Effects:FadeSound(session.ChargingSound, 0.1)
+			self.Effects:FadeSound(session.CrackleSound, 0.15)
+
+			if session.CastTrack and session.CastTrack.IsPlaying then
+				session.CastTrack:Stop(0.05)
+			end
+
+			if session.Sun.Parent then
+				session.Sun:Destroy()
+			end
+		end
+	end)
+
+	runStage("character cleanup", function()
+		self.Character:CleanupCast()
+	end)
+
+	runStage("movement unlock", function()
+		self.Character:UnlockMovement()
+	end)
+
+	if #failures > 0 then
+		error(table.concat(failures, "\n"), 0)
+	end
 end
 
 
 --[[
 @param     Controller      self       | The ability executing the cast.
 @param     AbilityVariant  variant    | The selected Cruel Sun variant.
-@return    void
+@return    boolean
 
 Orchestrates one complete cast while isolating and cleaning every yielding stage.
+Returns whether the cast reached its explicit projectile-launch commitment point.
 ]]
-function CruelSun._cast(self: Controller, variant: AbilityVariant)
+function CruelSun._cast(self: Controller, variant: AbilityVariant): boolean
 	if not self.Character:LockMovement() then
-		return
+		return false
 	end
 
 	local session: CastSession? = nil
-	local signalStarted = false
-	local signalEnded   = false
+	local signalStarted  = false
+	local signalReleased = false
+	local networkStarted = false
+	local impactResolved = false
+	local committed      = false
 
-	local succeeded, failure = pcall(function()
+	local succeeded, failure = xpcall(function()
 		session = self:_createSession(variant)
 
 		if not session then
@@ -326,6 +354,8 @@ function CruelSun._cast(self: Controller, variant: AbilityVariant)
 
 		castStartedSignal:Fire()
 		signalStarted = true
+		self.Impact:Begin(variant.Name)
+		networkStarted = true
 
 		local chargePower = self:_charge(session)
 
@@ -333,7 +363,10 @@ function CruelSun._cast(self: Controller, variant: AbilityVariant)
 			return
 		end
 
-		self:_playCastAnimation(session)
+		if not self:_playCastAnimation(session) then
+			return
+		end
+
 		self.Effects:FadeSound(session.ChargingSound, 0.1)
 		self.Effects:FadeSound(session.CrackleSound, 0.15)
 
@@ -341,8 +374,11 @@ function CruelSun._cast(self: Controller, variant: AbilityVariant)
 			emitter.Enabled = true
 		end
 
-		castEndedSignal:Fire(true)
-		signalEnded = true
+		self.Impact:Commit(chargePower, session.Sun.Position)
+		committed = true
+
+		castReleasedSignal:Fire(true)
+		signalReleased = true
 
 		local impactPosition = self.Projectile:Launch(session.Sun)
 		local hitboxRadius = self.Effects:CreateExplosion(
@@ -357,17 +393,42 @@ function CruelSun._cast(self: Controller, variant: AbilityVariant)
 			chargePower,
 			variant.ExplosionMultiplier
 		)
-	end)
+		impactResolved = true
+	end, debug.traceback)
 
-	if signalStarted and not signalEnded then
-		castEndedSignal:Fire(false)
-	end
+	local releaseSucceeded, releaseFailure = xpcall(function()
+		if signalStarted and not signalReleased then
+			castReleasedSignal:Fire(false)
+		end
+	end, debug.traceback)
 
-	self:_cleanup(session)
+	local cancelSucceeded, cancelFailure = xpcall(function()
+		if networkStarted and not impactResolved then
+			self.Impact:Cancel()
+		end
+	end, debug.traceback)
+
+	local cleanupSucceeded, cleanupFailure = xpcall(function()
+		self:_cleanup(session)
+	end, debug.traceback)
 
 	if not succeeded then
-		warn("Cruel Sun failed:", failure)
+		warn("Cruel Sun lifecycle failed:\n", failure)
 	end
+
+	if not releaseSucceeded then
+		warn("Cruel Sun release signal failed:\n", releaseFailure)
+	end
+
+	if not cancelSucceeded then
+		warn("Cruel Sun cancellation failed:\n", cancelFailure)
+	end
+
+	if not cleanupSucceeded then
+		warn("Cruel Sun cleanup failed:\n", cleanupFailure)
+	end
+
+	return committed
 end
 
 
@@ -378,6 +439,10 @@ end
 Registers input and begins background preloading for Cruel Sun.
 ]]
 function CruelSun.Start(self: Controller)
+	if self.Input then
+		return
+	end
+
 	self.Effects:Preload()
 
 	self.Input = UserInputService.InputBegan:Connect(function(input, gameProcessed)
@@ -393,9 +458,19 @@ function CruelSun.Start(self: Controller)
 		end
 
 		self.IsCasting = true
-		self:_cast(variant)
-		Cooldowns.Start(identifier, variant.Cooldown)
+		local succeeded, result = xpcall(function(): boolean
+			return self:_cast(variant)
+		end, debug.traceback)
 		self.IsCasting = false
+
+		if not succeeded then
+			warn("Unhandled Cruel Sun error:\n", result)
+			return
+		end
+
+		if result then
+			Cooldowns.Start(identifier, variant.Cooldown)
+		end
 	end)
 end
 
@@ -417,7 +492,15 @@ end
 
 
 
-type AbilityVariant = typeof(CONFIG.Variants.Compress)
+type AbilityVariant = {
+	Name                : string,
+	Key                 : Enum.KeyCode,
+	Cooldown            : number,
+	MaxScale            : number,
+	ChargeTime          : number,
+	Condense            : boolean,
+	ExplosionMultiplier : number,
+}
 
 type CastSession = {
 	Variant        : AbilityVariant,
@@ -425,7 +508,7 @@ type CastSession = {
 	Parts          : EffectsController.PartScaleMap,
 	Emitters       : EffectsController.EmitterScaleMap,
 	LaunchEmitters : {ParticleEmitter},
-	FirePoint      : Attachment?,
+	FirePoint      : Attachment,
 	ChargingSound  : Sound?,
 	CrackleSound   : Sound?,
 	CastTrack      : AnimationTrack?,

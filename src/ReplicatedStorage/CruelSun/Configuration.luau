@@ -1,5 +1,5 @@
 --[[
-Author(s)    Janss
+Author(s)    @sillyrelshy
 Date         12/07/26
 Version      1.0.0
 ]]
@@ -116,7 +116,7 @@ table.freeze(Configuration.Hitbox)
 table.freeze(Configuration.ImpactFrames)
 
 
-type AbilityVariant = {
+export type AbilityVariant = {
 	Name                : string,
 	Key                 : Enum.KeyCode,
 	Cooldown            : number,

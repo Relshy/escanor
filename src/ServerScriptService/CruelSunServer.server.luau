@@ -1,7 +1,7 @@
 --[[
-Author(s)    Janss
-Date         12/07/26
-Version      1.0.0
+Author(s)    @sillyrelshy
+Date         13/07/26
+Version      1.1.0
 ]]
 
 
@@ -17,41 +17,104 @@ local remotesFolder = systemFolder:WaitForChild("Remotes")
 local CONFIG    = require(systemFolder:WaitForChild("Configuration"))
 local hitRemote = remotesFolder:WaitForChild("CruelSunHit") :: RemoteEvent
 
-local lastRequestAt: {[Player]: number} = {}
+local CHARGE_GRACE       = 0.1
+local IMPACT_GRACE       = 5
+local MAX_CAST_LIFETIME  = 20
+local MAX_ORIGIN_DISTANCE = 75
+
+
+type AbilityVariant = {
+	Name                : string,
+	Key                 : Enum.KeyCode,
+	Cooldown            : number,
+	MaxScale            : number,
+	ChargeTime          : number,
+	Condense            : boolean,
+	ExplosionMultiplier : number,
+}
+
+type ActiveCast = {
+	Variant     : AbilityVariant,
+	StartedAt   : number,
+	CommittedAt : number?,
+	ChargePower : number?,
+	Origin      : Vector3?,
+}
+
+local activeCasts: {[Player]: ActiveCast} = {}
+local nextReadyAt: {[Player]: {[string]: number}} = {}
 
 
 
 --[[
-@param     Player     player         | The player requesting damage.
-@param     Vector3    position       | The requested centre of the explosion.
-@param     number     radius         | The requested damage radius.
-@return    boolean
+@param     number    value    | The numeric value being validated.
+@return    boolean            | Whether the value is neither NaN nor infinite.
 
-Validates that the requested explosion is plausible for the player's current character.
+Rejects non-finite remote payloads before they enter distance or damage calculations.
 ]]
-local function isValidRequest(
-	player: Player,
-	position: Vector3,
-	radius: number
-): boolean
-	local character = player.Character
-	local root      = character and character:FindFirstChild("HumanoidRootPart")
+local function isFiniteNumber(value: number): boolean
+	return value == value and value > -math.huge and value < math.huge
+end
 
-	if not root or not root:IsA("BasePart") then
-		return false
+
+--[[
+@param     Vector3    value    | The world-space vector being validated.
+@return    boolean             | Whether every component is finite.
+
+Prevents NaN components from bypassing magnitude comparisons in remote validation.
+]]
+local function isFiniteVector(value: Vector3): boolean
+	return isFiniteNumber(value.X)
+		and isFiniteNumber(value.Y)
+		and isFiniteNumber(value.Z)
+end
+
+
+--[[
+@param     string    variantName    | The client-requested configuration variant.
+@return    AbilityVariant?          | The matching immutable variant, when known.
+
+Resolves only variants defined by the server's own configuration table.
+]]
+local function getVariant(variantName: string): AbilityVariant?
+	if variantName == CONFIG.Variants.Compress.Name then
+		return CONFIG.Variants.Compress
+	elseif variantName == CONFIG.Variants.Giant.Name then
+		return CONFIG.Variants.Giant
 	end
 
-	return radius > 0
-		and radius <= CONFIG.Hitbox.MaximumRadius
-		and (position - root.Position).Magnitude <= CONFIG.MaxRange + radius
+	return nil
+end
+
+
+--[[
+@param     Player       player    | The player whose character is inspected.
+@return    BasePart?              | A living character's HumanoidRootPart.
+
+Rejects requests from missing or defeated characters before cast state is changed.
+]]
+local function getAliveRoot(player: Player): BasePart?
+	local character = player.Character
+	local humanoid  = character and character:FindFirstChildOfClass("Humanoid")
+	local root      = character and character:FindFirstChild("HumanoidRootPart")
+
+	if not humanoid
+		or humanoid.Health <= 0
+		or not root
+		or not root:IsA("BasePart")
+	then
+		return nil
+	end
+
+	return root
 end
 
 
 --[[
 @param     Player     player         | The player responsible for the explosion.
 @param     Vector3    position       | The centre of the explosion.
-@param     number     radius         | The server-validated damage radius.
-@param     number     chargePower    | The normalized charge of Cruel Sun.
+@param     number     radius         | The server-derived damage radius.
+@param     number     chargePower    | The server-capped normalized charge.
 @return    void
 
 Applies radial, distance-scaled damage once per Humanoid.
@@ -105,41 +168,173 @@ local function damageInRadius(
 end
 
 
+--[[
+@param     Player            player         | The player beginning a cast.
+@param     AbilityVariant    variant        | The server-resolved ability variant.
+@param     number            now            | The current server clock value.
+@return    void
+
+Starts the server-owned charge clock when the player is alive and off cooldown.
+]]
+local function beginCast(player: Player, variant: AbilityVariant, now: number)
+	if not getAliveRoot(player) then
+		return
+	end
+
+	local currentCast = activeCasts[player]
+
+	if currentCast and now - currentCast.StartedAt <= MAX_CAST_LIFETIME then
+		return
+	end
+
+	local playerCooldowns = nextReadyAt[player]
+
+	if playerCooldowns and now < (playerCooldowns[variant.Name] or 0) then
+		return
+	end
+
+	activeCasts[player] = {
+		Variant   = variant,
+		StartedAt = now,
+	}
+end
+
+
+--[[
+@param     Player     player             | The player committing a cast.
+@param     number     requestedCharge    | The client-observed normalized charge.
+@param     Vector3    origin             | The requested projectile launch point.
+@param     number     now                | The current server clock value.
+@return    void
+
+Caps charge using server elapsed time and begins cooldown only after launch commitment.
+]]
+local function commitCast(
+	player: Player,
+	requestedCharge: number,
+	origin: Vector3,
+	now: number
+)
+	local cast = activeCasts[player]
+	local root = getAliveRoot(player)
+
+	if not cast
+		or cast.CommittedAt
+		or not root
+		or now - cast.StartedAt > MAX_CAST_LIFETIME
+		or (origin - root.Position).Magnitude > MAX_ORIGIN_DISTANCE
+	then
+		return
+	end
+
+	local maximumCharge = math.clamp(
+		(now - cast.StartedAt) / cast.Variant.ChargeTime + CHARGE_GRACE,
+		0,
+		1
+	)
+	local chargePower = math.min(
+		math.clamp(requestedCharge, 0, 1),
+		maximumCharge
+	)
+
+	cast.CommittedAt = now
+	cast.ChargePower = chargePower
+	cast.Origin = origin
+
+	local playerCooldowns = nextReadyAt[player]
+
+	if not playerCooldowns then
+		playerCooldowns = {}
+		nextReadyAt[player] = playerCooldowns
+	end
+
+	playerCooldowns[cast.Variant.Name] = now + cast.Variant.Cooldown
+end
+
+
+--[[
+@param     Player     player      | The player resolving a committed projectile.
+@param     Vector3    position    | The client-observed impact position.
+@param     number     now         | The current server clock value.
+@return    void
+
+Derives hitbox size from trusted configuration and validates the projectile journey.
+]]
+local function resolveImpact(player: Player, position: Vector3, now: number)
+	local cast = activeCasts[player]
+
+	if not cast
+		or not cast.CommittedAt
+		or not cast.ChargePower
+		or not cast.Origin
+	then
+		return
+	end
+
+	activeCasts[player] = nil
+
+	local maximumFlightTime = CONFIG.MaxRange / CONFIG.ProjectileSpeed + IMPACT_GRACE
+
+	if now - cast.CommittedAt > maximumFlightTime then
+		return
+	end
+
+	local explosionScale = (
+		CONFIG.ExplosionBaseScale
+		+ CONFIG.ExplosionChargeBonus * cast.ChargePower
+	) * cast.Variant.ExplosionMultiplier
+	local radius = math.min(
+		explosionScale * CONFIG.Hitbox.RadiusMultiplier,
+		CONFIG.Hitbox.MaximumRadius
+	)
+
+	if radius <= 0
+		or (position - cast.Origin).Magnitude > CONFIG.MaxRange + radius
+	then
+		return
+	end
+
+	damageInRadius(player, position, radius, cast.ChargePower)
+end
+
+
 
 hitRemote.OnServerEvent:Connect(function(
 	player: Player,
-	position: unknown,
-	radius: unknown,
-	chargePower: unknown
+	action: unknown,
+	valueA: unknown,
+	valueB: unknown
 )
-	if typeof(position) ~= "Vector3"
-		or typeof(radius) ~= "number"
-		or typeof(chargePower) ~= "number"
+	if typeof(action) ~= "string" then
+		return
+	end
+
+	local now = workspace:GetServerTimeNow()
+
+	if action == "Begin" and typeof(valueA) == "string" then
+		local variant = getVariant(valueA)
+
+		if variant then
+			beginCast(player, variant, now)
+		end
+	elseif action == "Commit"
+		and typeof(valueA) == "number"
+		and typeof(valueB) == "Vector3"
+		and isFiniteNumber(valueA)
+		and isFiniteVector(valueB)
 	then
-		return
-	end
-
-	local now = os.clock()
-	local lastRequest = lastRequestAt[player]
-
-	if lastRequest
-		and now - lastRequest < CONFIG.Hitbox.RequestInterval
+		commitCast(player, valueA, valueB, now)
+	elseif action == "Impact"
+		and typeof(valueA) == "Vector3"
+		and isFiniteVector(valueA)
 	then
-		return
+		resolveImpact(player, valueA, now)
+	elseif action == "Cancel" then
+		activeCasts[player] = nil
 	end
-
-	if not isValidRequest(player, position, radius) then
-		return
-	end
-
-	lastRequestAt[player] = now
-	damageInRadius(
-		player,
-		position,
-		radius,
-		math.clamp(chargePower, 0, 1)
-	)
 end)
+
 Players.PlayerRemoving:Connect(function(player: Player)
-	lastRequestAt[player] = nil
+	activeCasts[player] = nil
+	nextReadyAt[player] = nil
 end)
