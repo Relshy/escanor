@@ -116,7 +116,7 @@ table.freeze(Configuration.Hitbox)
 table.freeze(Configuration.ImpactFrames)
 
 
-type AbilityVariant = {
+export type AbilityVariant = {
 	Name                : string,
 	Key                 : Enum.KeyCode,
 	Cooldown            : number,
