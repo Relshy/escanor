@@ -1,6 +1,6 @@
 -- Connected Discord-GitHub
 --[[
-Author(s)    Janss
+Author(s)    @sillyrelshy
 Date         12/07/26
 Version      1.0.0
 ]]
