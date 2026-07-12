@@ -7,7 +7,7 @@
 
 	Driven by ReplicatedStorage.CruelSun.Signals:
 	  CastStarted -> show the subtitle + play the voice
-	  CastEnded(launched) -> hide it (immediately on cancel, after a hold on launch)
+	  CastReleased(launched) -> hide it (immediately on cancel, after a hold on launch)
 ]]
 
 local Players = game:GetService("Players")
@@ -269,6 +269,6 @@ end
 signals:WaitForChild("CastStarted").Event:Connect(function()
 	showAbilitySubtitle(CFG.Text)
 end)
-signals:WaitForChild("CastEnded").Event:Connect(function(launched)
+signals:WaitForChild("CastReleased").Event:Connect(function(launched)
 	hideAbilitySubtitle(launched and (CFG.HoldAfterLaunch or 1.4) or 0)
 end)

@@ -1,7 +1,7 @@
 --[[
 Author(s)    @sillyrelshy
 Date         12/07/26
-Version      1.0.0
+Version      1.1.0
 ]]
 
 
@@ -41,6 +41,42 @@ function ImpactController.new(player: Player): Controller
 	self:_bindVisualizationControls()
 
 	return self
+end
+
+
+--[[
+@param     Controller    self           | The impact controller registering the cast.
+@param     string        variantName    | The selected configuration variant.
+@return    void
+
+Registers the chosen variant before charging so the server owns the cast clock.
+]]
+function ImpactController.Begin(self: Controller, variantName: string)
+	hitRemote:FireServer("Begin", variantName)
+end
+
+
+--[[
+@param     Controller    self           | The impact controller committing the cast.
+@param     number        chargePower    | The client-observed normalized charge.
+@param     Vector3       origin         | The world-space projectile launch position.
+@return    void
+
+Commits a successful cast. The server caps charge against its own elapsed cast time.
+]]
+function ImpactController.Commit(self: Controller, chargePower: number, origin: Vector3)
+	hitRemote:FireServer("Commit", chargePower, origin)
+end
+
+
+--[[
+@param     Controller    self    | The impact controller cancelling the cast.
+@return    void
+
+Discards pending server state for a cast that never reached launch commitment.
+]]
+function ImpactController.Cancel(self: Controller)
+	hitRemote:FireServer("Cancel")
 end
 
 
@@ -193,7 +229,7 @@ end
 --[[
 @param     Controller    self              | The impact controller resolving the hit.
 @param     Vector3       position          | The world-space impact position.
-@param     number        radius            | The server-validated damage radius.
+@param     number        radius            | The predicted local presentation radius.
 @param     number        chargePower       | The normalized charge of Cruel Sun.
 @param     number        sizeMultiplier    | The selected variant's size multiplier.
 @return    void
@@ -207,7 +243,7 @@ function ImpactController.Resolve(
 	chargePower: number,
 	sizeMultiplier: number
 )
-	hitRemote:FireServer(position, radius, chargePower)
+	hitRemote:FireServer("Impact", position)
 	impactSignal:Fire(position, radius, chargePower, sizeMultiplier)
 
 	if self.VisualizeHitbox then

@@ -9,10 +9,6 @@ ability, created for the HiddenDevs Luau Scripter application.
 - [Working Roblox demonstration](https://www.roblox.com/games/105831675964647/)
 - Studio path: `game.StarterPlayer.StarterPlayerScripts.CruelSunClient`
 
-The submission file is the 447-line client orchestrator. It preserves the
-required `-- Connected Discord-GitHub` verification comment on its first line
-and delegates focused responsibilities to strict-typed controllers.
-
 ## Architecture
 
 ```text
