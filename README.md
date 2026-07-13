@@ -1,7 +1,7 @@
-# Escanor — Cruel Sun
+# Escanor - Cruel Sun
 
-A modular, object-oriented Roblox Luau implementation of Escanor's Cruel Sun
-ability, created for the HiddenDevs Luau Scripter application.
+A self-contained, object-oriented Roblox Luau implementation of Escanor's
+Cruel Sun ability, created for the HiddenDevs Luau Scripter application.
 
 ## Submission
 
@@ -9,39 +9,15 @@ ability, created for the HiddenDevs Luau Scripter application.
 - [Working Roblox demonstration](https://www.roblox.com/games/105831675964647/)
 - Studio path: `game.StarterPlayer.StarterPlayerScripts.CruelSunClient`
 
-## Architecture
+The submitted LocalScript contains the complete client ability and has no
+ModuleScript requirements. It directly implements charge and compression math,
+CFrame placement, animation synchronization, raycast projectile physics, VFX
+scaling, cooldown state, lifecycle cleanup, and the validated remote protocol.
 
-```text
-ReplicatedStorage
-├── CooldownController
-└── CruelSun
-    ├── Assets
-    ├── Configuration
-    ├── Remotes
-    └── Signals
-
-StarterPlayer
-├── StarterCharacterScripts
-│   └── EscanorM1Combo
-└── StarterPlayerScripts
-    ├── CruelSunClient
-    ├── CruelSunImpactRocks
-    ├── CruelSunSubtitle
-    └── CruelSunModules
-        ├── CharacterController
-        ├── CompressionController
-        ├── EffectsController
-        ├── ImpactController
-        └── ProjectileController
-
-ServerScriptService
-├── CruelSunServer
-└── EscanorAxeServer
-```
-
-The repository contains the Luau source hierarchy. Visual assets, keyframe
-sequences, sounds, BindableEvents, and RemoteEvents remain authored in the
-linked Roblox place.
+The Roblox place also contains assets and supporting presentation scripts. A
+server companion validates cast timing, cooldowns, positions, hitbox radius,
+and damage; that separation is required because clients cannot securely award
+damage themselves.
 
 ## Author
 
