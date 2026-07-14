@@ -1,8 +1,8 @@
 -- Connected Discord-GitHub
 --[[
 Author(s)    @sillyrelshy
-Date         13/07/26
-Version      2.0.0
+Date         14/07/26
+Version      2.1.0
 ]]
 
 --!strict
@@ -11,8 +11,6 @@ local KeyframeSequenceProvider = game:GetService("KeyframeSequenceProvider")
 local Players                  = game:GetService("Players")
 local ReplicatedStorage        = game:GetService("ReplicatedStorage")
 local RunService               = game:GetService("RunService")
-local SoundService             = game:GetService("SoundService")
-local TweenService             = game:GetService("TweenService")
 local UserInputService         = game:GetService("UserInputService")
 
 local player        = Players.LocalPlayer
@@ -22,18 +20,22 @@ local remotesFolder = systemFolder:WaitForChild("Remotes")
 local signalsFolder = systemFolder:FindFirstChild("Signals")
 local cooldownStore = ReplicatedStorage:FindFirstChild("CooldownController")
 
-local sunTemplate       = assetsFolder:WaitForChild("CruelSunProjectileVFX") :: BasePart
-local explosionTemplate = assetsFolder:WaitForChild("CruelSunExplosionVFX") :: BasePart
-local castKeyframes     = assetsFolder:WaitForChild("CruelSunKeyframes") :: KeyframeSequence
-local hitRemote         = remotesFolder:WaitForChild("CruelSunHit") :: RemoteEvent
+local sunTemplate   = assetsFolder:WaitForChild("CruelSunProjectileVFX") :: BasePart
+local axeTemplate   = assetsFolder:WaitForChild("EscanorAxeTemplate") :: Model
+local castKeyframes = assetsFolder:WaitForChild("CruelSunKeyframes") :: KeyframeSequence
+local hitRemote     = remotesFolder:WaitForChild("CruelSunHit") :: RemoteEvent
+
+local CONFIG = require(systemFolder:WaitForChild("Configuration"))
+local PresentationController = require(script.Parent:WaitForChild("CruelSunPresentation"))
 
 --[[
 ARCHITECTURE
 
-This is the complete client implementation in one submitted script. One object
-owns one cast and advances it linearly through charge, optional compression,
-animation, projectile flight, impact, and cleanup. Linear ownership makes every
-temporary Instance and every cancellation path easy to audit.
+The submitted controller owns cast state and advances it linearly through charge,
+compression, animation, projectile flight, impact, and cleanup. A single focused
+presentation module owns reusable VFX, audio, and camera resources; it never
+decides gameplay or networking. This keeps the important ability logic visible
+without duplicating presentation cleanup throughout the controller.
 
 The client owns input and presentation for responsiveness, but never decides
 damage. Begin, Commit, Impact, and Cancel report observed phases to the server.
@@ -41,25 +43,15 @@ The server measures charge time, enforces cooldown, derives radius and damage
 from trusted configuration, and rejects implausible positions.
 ]]
 
-type AbilityVariant = {
-	Name                : string,
-	Key                 : Enum.KeyCode,
-	Cooldown            : number,
-	MaxScale            : number,
-	ChargeTime          : number,
-	Condense            : boolean,
-	ExplosionMultiplier : number,
-}
+type AbilityVariant = CONFIG.AbilityVariant
 type CastPhase =
 	"Idle" | "Charging" | "Compressing" | "Animating"
 	| "Launching" | "Impacting" | "Cleaning" | "Destroyed"
-type PartScaleMap = {[BasePart]: Vector3}
-type EmitterScaleMap = {[ParticleEmitter]: NumberSequence}
 type CastSession = {
 	Variant        : AbilityVariant,
 	Sun            : BasePart,
-	Parts          : PartScaleMap,
-	Emitters       : EmitterScaleMap,
+	Parts          : PresentationController.PartScaleMap,
+	Emitters       : PresentationController.EmitterScaleMap,
 	LaunchEmitters : {ParticleEmitter},
 	FirePoint      : Attachment?,
 	ChargingSound  : Sound?,
@@ -68,50 +60,10 @@ type CastSession = {
 	CurrentScale   : number,
 }
 
-local compressVariant: AbilityVariant = table.freeze({
-	Name = "Compress", Key = Enum.KeyCode.E, Cooldown = 3,
-	MaxScale = 8.5, ChargeTime = 5.5, Condense = true,
-	ExplosionMultiplier = 1,
-})
-local giantVariant: AbilityVariant = table.freeze({
-	Name = "Giant", Key = Enum.KeyCode.V, Cooldown = 6,
-	MaxScale = 25.5, ChargeTime = 7, Condense = false,
-	ExplosionMultiplier = 3,
-})
 local VARIANT_BY_KEY: {[Enum.KeyCode]: AbilityVariant} = {
-	[compressVariant.Key] = compressVariant,
-	[giantVariant.Key] = giantVariant,
+	[CONFIG.Variants.Compress.Key] = CONFIG.Variants.Compress,
+	[CONFIG.Variants.Giant.Key] = CONFIG.Variants.Giant,
 }
-local SOUND_IDS: {[string]: string} = table.freeze({
-	Charging = "rbxassetid://115535103935389",
-	ChargingCrackle = "rbxassetid://89716538298369",
-	Launch = "rbxassetid://2157448269",
-	CondenseDrop = "rbxassetid://79833203443837",
-	Traveling = "rbxassetid://9119462937",
-	ExplosionBoom = "rbxassetid://113076931050699",
-	ExplosionCrackle = "rbxassetid://140089926923698",
-})
-local SOUND_VOLUMES: {[string]: number} = table.freeze({
-	Charging = 0.6, ChargingCrackle = 0.35, Launch = 0.5,
-	CondenseDrop = 0.8, Traveling = 0.5,
-	ExplosionBoom = 3, ExplosionCrackle = 1.5,
-})
-
-local MIN_SCALE                   = 0.1
-local CHARGE_POSE_FADE_TIME       = 0.22
-local CAST_FADE_TIME              = 0.08
-local CAST_LAUNCH_NORMALIZED_TIME = 0.58
-local COMPRESSED_SCALE            = 0.65
-local COMPRESSED_MAX_SCALE        = 1.8
-local COMPRESSION_TIME            = 0.3
-local PROJECTILE_SPEED            = 360
-local GRAVITY_BEND                = 12
-local MAX_RANGE                   = 1000
-local EXPLOSION_BASE_SCALE        = 18
-local EXPLOSION_CHARGE_BONUS      = 18
-local HITBOX_RADIUS_MULTIPLIER    = 0.75
-local AXE_FIRE_POINT_OFFSET       = Vector3.new(3.9, 0, 3.05)
-local FALLBACK_CHARGE_OFFSET      = Vector3.new(0, 1, -3)
 
 local CruelSun = {}
 CruelSun.__index = CruelSun
@@ -119,9 +71,12 @@ CruelSun.__index = CruelSun
 local localCooldowns: {[string]: number} = {}
 
 type Controller = typeof(setmetatable({} :: {
+	Presentation       : PresentationController.Controller,
 	RegisteredCastId   : string?,
 	CachedCastTrack    : AnimationTrack?,
 	CachedCastHumanoid : Humanoid?,
+	TemporaryAxe       : Model?,
+	TemporaryGrip      : Motor6D?,
 	ActiveSession      : CastSession?,
 	Phase              : CastPhase,
 	IsCasting          : boolean,
@@ -169,77 +124,6 @@ local function startCooldown(identifier: string, duration: number)
 	cooldownStore:SetAttribute(cooldownAttribute(identifier, "Duration"), duration)
 end
 
-local function scaleSequence(sequence: NumberSequence, scale: number): NumberSequence
-	local keypoints = {}
-	for _, keypoint in sequence.Keypoints do
-		table.insert(keypoints, NumberSequenceKeypoint.new(
-			keypoint.Time,
-			keypoint.Value * scale,
-			keypoint.Envelope * scale
-		))
-	end
-	return NumberSequence.new(keypoints)
-end
-
--- Scaling always starts from recorded authored sizes. Multiplying the current
--- size each frame would accumulate floating-point error and distort particles.
-local function getScaleTargets(root: Instance): (PartScaleMap, EmitterScaleMap)
-	local parts: PartScaleMap = {}
-	local emitters: EmitterScaleMap = {}
-	if root:IsA("BasePart") then
-		parts[root] = root.Size
-	end
-	for _, descendant in root:GetDescendants() do
-		if descendant:IsA("BasePart") then
-			parts[descendant] = descendant.Size
-		elseif descendant:IsA("ParticleEmitter") then
-			emitters[descendant] = descendant.Size
-		end
-	end
-	return parts, emitters
-end
-
-local function applyScale(parts: PartScaleMap, emitters: EmitterScaleMap, scale: number)
-	for part, originalSize in parts do
-		if part.Parent then
-			part.Size = originalSize * scale
-		end
-	end
-	for emitter, originalSize in emitters do
-		if emitter.Parent then
-			emitter.Size = scaleSequence(originalSize, scale)
-		end
-	end
-end
-
-local function createSound(name: string, parent: Instance): Sound?
-	local soundId = SOUND_IDS[name]
-	if not soundId then
-		return nil
-	end
-	local explosion = name == "ExplosionBoom" or name == "ExplosionCrackle"
-	local sound = Instance.new("Sound")
-	sound.Name = name
-	sound.SoundId = soundId
-	sound.Volume = SOUND_VOLUMES[name] or 1
-	sound.RollOffMode = Enum.RollOffMode.InverseTapered
-	sound.RollOffMinDistance = if explosion then 30 else 5
-	sound.RollOffMaxDistance = if explosion then 3000 else 150
-	sound.Parent = parent
-	return sound
-end
-
--- Reparenting before a VFX is destroyed lets the sound fade instead of being
--- cut off with its former parent.
-local function fadeSound(sound: Sound?, duration: number)
-	if not sound or not sound.Parent then
-		return
-	end
-	sound.Parent = SoundService
-	TweenService:Create(sound, TweenInfo.new(duration), {Volume = 0}):Play()
-	Debris:AddItem(sound, duration + 0.25)
-end
-
 -- Cleanup operations are isolated so a broken VFX cannot prevent movement
 -- restoration. debug.traceback keeps the originating line in any warning.
 local function cleanupStep(label: string, callback: () -> ())
@@ -251,9 +135,12 @@ end
 
 function CruelSun.new(): Controller
 	return setmetatable({
+		Presentation = PresentationController.new(player),
 		RegisteredCastId = nil,
 		CachedCastTrack = nil,
 		CachedCastHumanoid = nil,
+		TemporaryAxe = nil,
+		TemporaryGrip = nil,
 		ActiveSession = nil,
 		Phase = "Idle",
 		IsCasting = false,
@@ -284,8 +171,9 @@ function CruelSun._lockMovement(self: Controller): boolean
 	if not humanoid then
 		return false
 	end
-	humanoid:SetAttribute("CruelSunWalkSpeed", humanoid.WalkSpeed)
-	humanoid:SetAttribute("CruelSunJumpPower", humanoid.JumpPower)
+	humanoid:SetAttribute("OldWalkSpeed", humanoid.WalkSpeed)
+	humanoid:SetAttribute("OldJumpPower", humanoid.JumpPower)
+	humanoid:SetAttribute("MovementLocked", true)
 	humanoid.WalkSpeed = 0
 	humanoid.JumpPower = 0
 	humanoid.AutoRotate = false
@@ -297,34 +185,97 @@ function CruelSun._unlockMovement(self: Controller)
 	if not humanoid then
 		return
 	end
-	local walkSpeed = humanoid:GetAttribute("CruelSunWalkSpeed")
-	local jumpPower = humanoid:GetAttribute("CruelSunJumpPower")
+	local walkSpeed = humanoid:GetAttribute("OldWalkSpeed")
+	local jumpPower = humanoid:GetAttribute("OldJumpPower")
 	humanoid.WalkSpeed = if typeof(walkSpeed) == "number" then walkSpeed else 16
 	humanoid.JumpPower = if typeof(jumpPower) == "number" then jumpPower else 50
 	humanoid.AutoRotate = true
+	humanoid:SetAttribute("MovementLocked", false)
 end
 
--- The equipped axe is preferred, but root-relative placement remains a safe
--- fallback if another character system removes it during a cast.
-function CruelSun._getFirePoint(self: Controller): Attachment?
-	local character = player.Character
-	local axe = character and character:FindFirstChild("EscanorAxe")
-	if not axe or not axe:IsA("Model") then
-		return nil
-	end
-	local handle = axe.PrimaryPart or axe:FindFirstChild("Handle")
-	if not handle or not handle:IsA("BasePart") then
-		return nil
-	end
+-- Reusing one named attachment keeps the charge transform deterministic even
+-- when the melee system already equipped the axe before this ability starts.
+local function getFirePoint(handle: BasePart): Attachment
 	local existing = handle:FindFirstChild("CruelSunFirePoint")
 	local firePoint = if existing and existing:IsA("Attachment")
 		then existing
 		else Instance.new("Attachment")
 	firePoint.Name = "CruelSunFirePoint"
-	firePoint.CFrame = CFrame.new(AXE_FIRE_POINT_OFFSET)
+	firePoint.CFrame = CFrame.new(CONFIG.AxeFirePointOffset)
 	firePoint.Visible = false
 	firePoint.Parent = handle
 	return firePoint
+end
+
+-- Every fallback part is massless and non-colliding so a presentation prop
+-- cannot change Escanor's assembly mass, collision response, or raycast aim.
+local function configureAxe(axe: Model)
+	for _, descendant in axe:GetDescendants() do
+		if descendant:IsA("BasePart") then
+			descendant.Anchored = false
+			descendant.CanCollide = false
+			descendant.CanQuery = false
+			descendant.Massless = true
+		end
+	end
+end
+
+function CruelSun._cleanupAxe(self: Controller)
+	if self.TemporaryGrip then
+		self.TemporaryGrip:Destroy()
+		self.TemporaryGrip = nil
+	end
+	if self.TemporaryAxe then
+		self.TemporaryAxe:Destroy()
+		self.TemporaryAxe = nil
+	end
+end
+
+-- The normal Escanor axe is preferred. If the melee loadout is absent, the
+-- controller rigs the authored template to either R6 or R15's right hand so
+-- the demonstrated ability retains the same casting pose in a clean place.
+function CruelSun._prepareAxe(self: Controller): Attachment?
+	self:_cleanupAxe()
+	local character = player.Character
+	local rightArm = character
+		and (character:FindFirstChild("Right Arm") or character:FindFirstChild("RightHand"))
+	if not character or not rightArm or not rightArm:IsA("BasePart") then
+		return nil
+	end
+	local equipped = character:FindFirstChild("EscanorAxe")
+	if equipped and equipped:IsA("Model") then
+		local handle = equipped.PrimaryPart or equipped:FindFirstChild("Handle")
+		if handle and handle:IsA("BasePart") then
+			return getFirePoint(handle)
+		end
+	end
+	local axe = axeTemplate:Clone()
+	local handle = axe.PrimaryPart or axe:FindFirstChild("Handle")
+	if not handle or not handle:IsA("BasePart") then
+		axe:Destroy()
+		return nil
+	end
+	configureAxe(axe)
+	axe.Name = "EscanorAbilityAxe"
+	axe.Parent = character
+
+	-- Pivoting the whole welded model preserves its authored internal offsets;
+	-- the Motor6D then records that solved pose relative to the animated arm.
+	local grip = rightArm:FindFirstChild("RightGripAttachment")
+	local gripFrame = if grip and grip:IsA("Attachment")
+		then grip.WorldCFrame
+		else rightArm.CFrame * CFrame.new(0, -1, 0)
+	local target = CFrame.new(gripFrame.Position) * handle.CFrame.Rotation
+	axe:PivotTo(target * handle.CFrame:Inverse() * axe:GetPivot())
+	local motor = Instance.new("Motor6D")
+	motor.Name = "AxeGrip"
+	motor.Part0 = rightArm
+	motor.Part1 = handle
+	motor.C0 = rightArm.CFrame:ToObjectSpace(handle.CFrame)
+	motor.Parent = rightArm
+	self.TemporaryAxe = axe
+	self.TemporaryGrip = motor
+	return getFirePoint(handle)
 end
 
 -- As scale grows, the visual centre moves upward so the sphere expands away
@@ -336,14 +287,17 @@ function CruelSun._getChargeCFrame(
 ): CFrame?
 	local extraScale = math.max(scale - 1, 0)
 	if firePoint and firePoint.Parent then
-		return firePoint.WorldCFrame + Vector3.new(0, extraScale * 0.45, 0)
+		return firePoint.WorldCFrame + Vector3.new(0, extraScale * CONFIG.AxeScaleLift, 0)
 	end
 	local root = self:_getRoot()
 	if not root then
 		return nil
 	end
-	local offset = FALLBACK_CHARGE_OFFSET
-		+ Vector3.new(0, extraScale * 0.12, -extraScale * 0.82)
+	local offset = CONFIG.ChargeOffset + Vector3.new(
+		0,
+		extraScale * CONFIG.ChargeUpPush,
+		-extraScale * CONFIG.ChargeForwardPush
+	)
 	return root.CFrame * CFrame.new(offset)
 end
 
@@ -404,26 +358,11 @@ function CruelSun._stopCompetingAnimations(
 	end
 end
 
-local function getLaunchEmitters(sun: BasePart): {ParticleEmitter}
-	local result: {ParticleEmitter} = {}
-	for _, descendant in sun:GetDescendants() do
-		if descendant:IsA("ParticleEmitter")
-			and (descendant.Name == "Dot Spec 1"
-				or descendant.Name == "Star10"
-				or descendant.Name == "CirclesFB4")
-		then
-			descendant.Enabled = false
-			table.insert(result, descendant)
-		end
-	end
-	return result
-end
-
 function CruelSun._createSession(
 	self: Controller,
 	variant: AbilityVariant
 ): CastSession?
-	local firePoint = self:_getFirePoint()
+	local firePoint = self:_prepareAxe()
 	local sun = sunTemplate:Clone()
 	sun.Name = "CruelSun"
 	sun.Anchored = true
@@ -431,16 +370,16 @@ function CruelSun._createSession(
 	sun.CanQuery = false
 	sun.CanTouch = false
 	sun.Parent = workspace
-	local chargeCFrame = self:_getChargeCFrame(MIN_SCALE, firePoint)
+	local chargeCFrame = self:_getChargeCFrame(CONFIG.MinScale, firePoint)
 	if not chargeCFrame then
 		sun:Destroy()
 		return nil
 	end
 	sun.CFrame = chargeCFrame
-	local parts, emitters = getScaleTargets(sun)
-	applyScale(parts, emitters, MIN_SCALE)
-	local chargingSound = createSound("Charging", sun)
-	local crackleSound = createSound("ChargingCrackle", sun)
+	local parts, emitters = self.Presentation:GetScaleTargets(sun)
+	self.Presentation:ApplyScale(parts, emitters, CONFIG.MinScale)
+	local chargingSound = self.Presentation:CreateSound("Charging", sun)
+	local crackleSound = self.Presentation:CreateSound("ChargingCrackle", sun)
 	if chargingSound then
 		chargingSound:Play()
 	end
@@ -451,8 +390,8 @@ function CruelSun._createSession(
 	end
 	local castTrack = self:_getCastTrack()
 	if castTrack then
-		self:_stopCompetingAnimations(castTrack, CHARGE_POSE_FADE_TIME)
-		castTrack:Play(CHARGE_POSE_FADE_TIME, 1, 0)
+		self:_stopCompetingAnimations(castTrack, CONFIG.ChargePoseFadeTime)
+		castTrack:Play(CONFIG.ChargePoseFadeTime, 1, 0)
 		castTrack.TimePosition = 0
 		castTrack:AdjustSpeed(0)
 	end
@@ -461,12 +400,12 @@ function CruelSun._createSession(
 		Sun = sun,
 		Parts = parts,
 		Emitters = emitters,
-		LaunchEmitters = getLaunchEmitters(sun),
+		LaunchEmitters = self.Presentation:GetLaunchEmitters(sun),
 		FirePoint = firePoint,
 		ChargingSound = chargingSound,
 		CrackleSound = crackleSound,
 		CastTrack = castTrack,
-		CurrentScale = MIN_SCALE,
+		CurrentScale = CONFIG.MinScale,
 	}
 end
 
@@ -482,58 +421,35 @@ function CruelSun._setChargeScale(
 	end
 	session.CurrentScale = scale
 	session.Sun.CFrame = target
-	applyScale(session.Parts, session.Emitters, scale)
+	self.Presentation:ApplyScale(session.Parts, session.Emitters, scale)
 	if session.CrackleSound then
-		session.CrackleSound.Volume = SOUND_VOLUMES.ChargingCrackle * volumeBoost
+		session.CrackleSound.Volume = CONFIG.Volumes.ChargingCrackle * volumeBoost
 	end
 	return true
 end
 
-local function playCompressionPulse(sun: BasePart, fromScale: number, toScale: number)
-	local pulse = Instance.new("Part")
-	pulse.Name = "CruelSunCompression"
-	pulse.Shape = Enum.PartType.Ball
-	pulse.Anchored = true
-	pulse.CanCollide = false
-	pulse.CanQuery = false
-	pulse.CanTouch = false
-	pulse.Material = Enum.Material.Neon
-	pulse.Color = Color3.fromRGB(255, 123, 35)
-	pulse.Transparency = 0.48
-	pulse.Size = Vector3.one * math.max(fromScale * 1.1, 1)
-	pulse.CFrame = sun.CFrame
-	pulse.Parent = workspace
-	local sound = createSound("CondenseDrop", pulse)
-	if sound then
-		sound:Play()
-	end
-	TweenService:Create(
-		pulse,
-		TweenInfo.new(COMPRESSION_TIME, Enum.EasingStyle.Quint),
-		{Size = Vector3.one * math.max(toScale, 0.5), Transparency = 1}
-	):Play()
-	Debris:AddItem(pulse, COMPRESSION_TIME + 0.1)
-end
-
--- Quintic easing accelerates toward the compressed size, communicating force
--- rather than a uniform resize. Releasing the key cancels the transition and
--- launches at the most recent valid scale.
-function CruelSun._compress(
+-- Each drop emits once and uses quintic easing. Its slow start preserves the
+-- previous held size long enough to read, while the steep finish makes the
+-- contraction feel forceful without adding more per-frame effects.
+function CruelSun._dropToScale(
 	self: Controller,
 	session: CastSession,
 	fromScale: number,
-	chargePower: number
+	toScale: number,
+	duration: number,
+	volumeBoost: number,
+	pitch: number
 ): boolean
-	self:_setPhase("Compressing")
-	local targetScale = COMPRESSED_SCALE
-		+ (COMPRESSED_MAX_SCALE - COMPRESSED_SCALE) * chargePower
-	playCompressionPulse(session.Sun, fromScale, targetScale)
+	self.Presentation:PlayCondensePulse(session.Sun, fromScale, toScale, pitch)
 	local startedAt = os.clock()
 	while UserInputService:IsKeyDown(session.Variant.Key) do
-		local alpha = math.clamp((os.clock() - startedAt) / COMPRESSION_TIME, 0, 1)
+		local alpha = math.clamp((os.clock() - startedAt) / duration, 0, 1)
 		local eased = 1 - (1 - alpha) ^ 5
-		local scale = fromScale + (targetScale - fromScale) * eased
-		if not self:_setChargeScale(session, scale, 1 + alpha * 0.45) then
+		if not self:_setChargeScale(
+			session,
+			fromScale + (toScale - fromScale) * eased,
+			volumeBoost
+		) then
 			return false
 		end
 		if alpha >= 1 then
@@ -542,6 +458,57 @@ function CruelSun._compress(
 		RunService.Heartbeat:Wait()
 	end
 	return false
+end
+
+-- Holds are deliberate pauses between drops, not idle delays: the sun remains
+-- attached to the animated axe and validates character state every Heartbeat.
+function CruelSun._holdScale(
+	self: Controller,
+	session: CastSession,
+	scale: number,
+	duration: number,
+	volumeBoost: number
+): boolean
+	local startedAt = os.clock()
+	while UserInputService:IsKeyDown(session.Variant.Key)
+		and os.clock() - startedAt < duration
+	do
+		if not self:_setChargeScale(session, scale, volumeBoost) then
+			return false
+		end
+		RunService.Heartbeat:Wait()
+	end
+	return UserInputService:IsKeyDown(session.Variant.Key)
+end
+
+-- Three progressively smaller targets reproduce the original "compressed sun"
+-- cadence. Every early return means the player released E, so launch continues
+-- from the last visible scale rather than completing hidden work afterward.
+function CruelSun._compress(
+	self: Controller,
+	session: CastSession,
+	chargeScale: number,
+	chargePower: number
+): boolean
+	self:_setPhase("Compressing")
+	local compressed = CONFIG.CompressedScale
+		+ (CONFIG.CompressedMaxScale - CONFIG.CompressedScale) * chargePower
+	local first = compressed + (chargeScale - compressed) * 0.42
+	local second = compressed + (chargeScale - compressed) * 0.16
+	if not self:_dropToScale(
+		session, chargeScale, first, CONFIG.CompressionDropTime, 1.35, 0.82
+	) or not self:_holdScale(
+		session, first, CONFIG.CompressionHoldTime, 1.2
+	) or not self:_dropToScale(
+		session, first, second, CONFIG.CompressionDropTime * 1.35, 1.55, 1
+	) or not self:_holdScale(
+		session, second, CONFIG.CompressionHoldTime * 1.6, 1.25
+	) or not self:_dropToScale(
+		session, second, compressed, CONFIG.CompressionFinalTime, 1.65, 1.18
+	) then
+		return false
+	end
+	return self:_setChargeScale(session, compressed, 1.45)
 end
 
 -- One normalized value drives scale, crackle volume, compression, presentation,
@@ -554,8 +521,8 @@ function CruelSun._charge(self: Controller, session: CastSession): number?
 		local alpha = math.clamp(
 			(os.clock() - startedAt) / session.Variant.ChargeTime, 0, 1
 		)
-		local scale = MIN_SCALE
-			+ (session.Variant.MaxScale - MIN_SCALE) * alpha
+		local scale = CONFIG.MinScale
+			+ (session.Variant.MaxScale - CONFIG.MinScale) * alpha
 		chargePower = alpha
 		if not self:_setChargeScale(session, scale, alpha) then
 			return nil
@@ -588,13 +555,13 @@ function CruelSun._playCastAnimation(
 		return true
 	end
 	self:_setPhase("Animating")
-	self:_stopCompetingAnimations(track, CAST_FADE_TIME)
+	self:_stopCompetingAnimations(track, CONFIG.CastFadeTime)
 	if track.IsPlaying then
 		track.TimePosition = 0
-		track:AdjustWeight(1, CAST_FADE_TIME)
+		track:AdjustWeight(1, CONFIG.CastFadeTime)
 		track:AdjustSpeed(1)
 	else
-		track:Play(CAST_FADE_TIME, 1, 1)
+		track:Play(CONFIG.CastFadeTime, 1, 1)
 	end
 	local lengthDeadline = os.clock() + 1
 	while track.Length <= 0 and os.clock() < lengthDeadline do
@@ -604,7 +571,7 @@ function CruelSun._playCastAnimation(
 		RunService.Heartbeat:Wait()
 	end
 	local launchTime = if track.Length > 0
-		then track.Length * CAST_LAUNCH_NORMALIZED_TIME
+		then track.Length * CONFIG.CastLaunchNormalizedTime
 		else 0.25
 	local deadline = os.clock() + launchTime + 0.5
 	while track.TimePosition < launchTime and os.clock() < deadline do
@@ -626,8 +593,10 @@ function CruelSun._getAimDirection(self: Controller, origin: Vector3): Vector3
 	local parameters = RaycastParams.new()
 	parameters.FilterType = Enum.RaycastFilterType.Exclude
 	parameters.FilterDescendantsInstances = if player.Character then {player.Character} else {}
-	local result = workspace:Raycast(ray.Origin, ray.Direction * MAX_RANGE, parameters)
-	local target = if result then result.Position else ray.Origin + ray.Direction * MAX_RANGE
+	local result = workspace:Raycast(ray.Origin, ray.Direction * CONFIG.MaxRange, parameters)
+	local target = if result
+		then result.Position
+		else ray.Origin + ray.Direction * CONFIG.MaxRange
 	local direction = target - origin
 	return if direction.Magnitude > 0.01 then direction.Unit else camera.CFrame.LookVector
 end
@@ -638,18 +607,18 @@ function CruelSun._launchProjectile(self: Controller, sun: BasePart): Vector3
 	self:_setPhase("Launching")
 	local root = self:_getRoot()
 	if root then
-		local launchSound = createSound("Launch", root)
+		local launchSound = self.Presentation:CreateSound("Launch", root)
 		if launchSound then
 			launchSound:Play()
 			Debris:AddItem(launchSound, 3)
 		end
 	end
-	local travelSound = createSound("Traveling", sun)
+	local travelSound = self.Presentation:CreateSound("Traveling", sun)
 	if travelSound then
 		travelSound.Looped = true
 		travelSound:Play()
 	end
-	local velocity = self:_getAimDirection(sun.Position) * PROJECTILE_SPEED
+	local velocity = self:_getAimDirection(sun.Position) * CONFIG.ProjectileSpeed
 	local travelled = 0
 	local lastPosition = sun.Position
 	local parameters = RaycastParams.new()
@@ -657,9 +626,9 @@ function CruelSun._launchProjectile(self: Controller, sun: BasePart): Vector3
 	parameters.FilterDescendantsInstances = if player.Character
 		then {sun, player.Character}
 		else {sun}
-	while travelled < MAX_RANGE and sun.Parent do
+	while travelled < CONFIG.MaxRange and sun.Parent do
 		local deltaTime = RunService.Heartbeat:Wait()
-		velocity -= Vector3.new(0, GRAVITY_BEND * deltaTime, 0)
+		velocity -= Vector3.new(0, CONFIG.GravityBend * deltaTime, 0)
 		local step = velocity * deltaTime
 		local result = workspace:Raycast(sun.Position, step, parameters)
 		if result then
@@ -671,7 +640,7 @@ function CruelSun._launchProjectile(self: Controller, sun: BasePart): Vector3
 		lastPosition = nextPosition
 		travelled += step.Magnitude
 	end
-	fadeSound(travelSound, 0.06)
+	self.Presentation:FadeSound(travelSound, 0.06)
 	sun:Destroy()
 	return lastPosition
 end
@@ -683,30 +652,7 @@ function CruelSun._createExplosion(
 	multiplier: number
 ): number
 	self:_setPhase("Impacting")
-	local explosion = explosionTemplate:Clone()
-	local scale = (
-		EXPLOSION_BASE_SCALE + EXPLOSION_CHARGE_BONUS * math.clamp(chargePower, 0, 1)
-	) * multiplier
-	explosion.Anchored = true
-	explosion.CanCollide = false
-	explosion.CanQuery = false
-	explosion.CanTouch = false
-	explosion.CFrame = CFrame.new(position)
-	explosion.Parent = workspace
-	local parts, emitters = getScaleTargets(explosion)
-	applyScale(parts, emitters, scale)
-	for emitter in emitters do
-		local count = emitter:GetAttribute("EmitCount")
-		emitter:Emit(if typeof(count) == "number" then count else 5)
-	end
-	for _, name in {"ExplosionBoom", "ExplosionCrackle"} do
-		local sound = createSound(name, explosion)
-		if sound then
-			sound:Play()
-		end
-	end
-	Debris:AddItem(explosion, 6)
-	return scale * HITBOX_RADIUS_MULTIPLIER
+	return self.Presentation:CreateExplosion(position, chargePower, multiplier)
 end
 
 function CruelSun._cleanup(self: Controller, session: CastSession?)
@@ -714,8 +660,8 @@ function CruelSun._cleanup(self: Controller, session: CastSession?)
 	local active = session or self.ActiveSession
 	cleanupStep("presentation cleanup", function()
 		if active then
-			fadeSound(active.ChargingSound, 0.1)
-			fadeSound(active.CrackleSound, 0.15)
+			self.Presentation:FadeSound(active.ChargingSound, 0.1)
+			self.Presentation:FadeSound(active.CrackleSound, 0.15)
 			if active.CastTrack and active.CastTrack.IsPlaying then
 				active.CastTrack:Stop(0.05)
 			end
@@ -726,6 +672,9 @@ function CruelSun._cleanup(self: Controller, session: CastSession?)
 	end)
 	cleanupStep("movement restoration", function()
 		self:_unlockMovement()
+	end)
+	cleanupStep("temporary axe cleanup", function()
+		self:_cleanupAxe()
 	end)
 	if self.ActiveSession == active then
 		self.ActiveSession = nil
@@ -761,8 +710,8 @@ function CruelSun._cast(self: Controller, variant: AbilityVariant): boolean
 		if chargePower == nil or not self:_playCastAnimation(session) then
 			return
 		end
-		fadeSound(session.ChargingSound, 0.1)
-		fadeSound(session.CrackleSound, 0.15)
+		self.Presentation:FadeSound(session.ChargingSound, 0.1)
+		self.Presentation:FadeSound(session.CrackleSound, 0.15)
 		for _, emitter in session.LaunchEmitters do
 			emitter.Enabled = true
 		end
@@ -795,6 +744,7 @@ function CruelSun.Start(self: Controller)
 	if self.Destroyed or self.Input then
 		return
 	end
+	self.Presentation:Preload()
 	self.Input = UserInputService.InputBegan:Connect(function(input, gameProcessed)
 		local variant = VARIANT_BY_KEY[input.KeyCode]
 		local identifier = input.KeyCode.Name
