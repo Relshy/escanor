@@ -9,7 +9,7 @@ created for the HiddenDevs Luau Scripter application.
 - [Working Roblox demonstration](https://www.roblox.com/games/105831675964647/)
 - Studio path: `game.StarterPlayer.StarterPlayerScripts.CruelSunClient`
 
-The submitted LocalScript contains 683 nonblank, non-comment Luau lines. It
+The submitted LocalScript contains 673 nonblank, non-comment Luau lines. It
 directly implements cast state, movement and axe control, three-stage charge
 compression, CFrame placement, animation synchronization, raycast projectile
 physics, cooldown state, lifecycle cleanup, and the validated remote protocol.

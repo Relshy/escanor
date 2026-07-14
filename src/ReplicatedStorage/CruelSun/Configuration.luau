@@ -1,7 +1,7 @@
 --[[
 Author(s)    @sillyrelshy
-Date         12/07/26
-Version      1.0.0
+Date         14/07/26
+Version      1.1.0
 ]]
 
 
@@ -61,6 +61,19 @@ local Configuration: AbilityConfiguration = {
 		},
 	},
 
+	Animations = {
+		CruelSunCast = "rbxassetid://102888325593193",
+		EscSlash = {
+			"rbxassetid://104274151790993",
+			"rbxassetid://135482932110982",
+			"rbxassetid://79386782651157",
+			"rbxassetid://75031466849320",
+			"rbxassetid://121542871079816",
+		},
+		Sprint = "rbxassetid://126655159344638",
+		Walk = "rbxassetid://123199532965985",
+	},
+
 	Sounds = {
 		Charging        = "rbxassetid://115535103935389",
 		ChargingCrackle = "rbxassetid://89716538298369",
@@ -110,6 +123,8 @@ local Configuration: AbilityConfiguration = {
 table.freeze(Configuration.Variants.Compress)
 table.freeze(Configuration.Variants.Giant)
 table.freeze(Configuration.Variants)
+table.freeze(Configuration.Animations.EscSlash)
+table.freeze(Configuration.Animations)
 table.freeze(Configuration.Sounds)
 table.freeze(Configuration.Volumes)
 table.freeze(Configuration.Hitbox)
@@ -153,6 +168,12 @@ type AbilityConfiguration = {
 	Variants                    : {
 		Compress : AbilityVariant,
 		Giant    : AbilityVariant,
+	},
+	Animations                  : {
+		CruelSunCast : string,
+		EscSlash     : {string},
+		Sprint       : string,
+		Walk         : string,
 	},
 	Sounds                      : {[string]: string},
 	Volumes                     : {[string]: number},

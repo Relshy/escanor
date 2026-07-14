@@ -2,12 +2,11 @@
 --[[
 Author(s)    @sillyrelshy
 Date         14/07/26
-Version      2.1.0
+Version      2.2.0
 ]]
 
 --!strict
 local Debris                   = game:GetService("Debris")
-local KeyframeSequenceProvider = game:GetService("KeyframeSequenceProvider")
 local Players                  = game:GetService("Players")
 local ReplicatedStorage        = game:GetService("ReplicatedStorage")
 local RunService               = game:GetService("RunService")
@@ -22,7 +21,6 @@ local cooldownStore = ReplicatedStorage:FindFirstChild("CooldownController")
 
 local sunTemplate   = assetsFolder:WaitForChild("CruelSunProjectileVFX") :: BasePart
 local axeTemplate   = assetsFolder:WaitForChild("EscanorAxeTemplate") :: Model
-local castKeyframes = assetsFolder:WaitForChild("CruelSunKeyframes") :: KeyframeSequence
 local hitRemote     = remotesFolder:WaitForChild("CruelSunHit") :: RemoteEvent
 
 local CONFIG = require(systemFolder:WaitForChild("Configuration"))
@@ -72,7 +70,6 @@ local localCooldowns: {[string]: number} = {}
 
 type Controller = typeof(setmetatable({} :: {
 	Presentation       : PresentationController.Controller,
-	RegisteredCastId   : string?,
 	CachedCastTrack    : AnimationTrack?,
 	CachedCastHumanoid : Humanoid?,
 	TemporaryAxe       : Model?,
@@ -136,7 +133,6 @@ end
 function CruelSun.new(): Controller
 	return setmetatable({
 		Presentation = PresentationController.new(player),
-		RegisteredCastId = nil,
 		CachedCastTrack = nil,
 		CachedCastHumanoid = nil,
 		TemporaryAxe = nil,
@@ -301,6 +297,9 @@ function CruelSun._getChargeCFrame(
 	return root.CFrame * CFrame.new(offset)
 end
 
+-- The published asset ID is required outside Studio; embedded KeyframeSequences
+-- only produce temporary preview IDs. Caching one native track per Humanoid
+-- avoids reloading the asset on every cast while invalidating safely on respawn.
 function CruelSun._getCastTrack(self: Controller): AnimationTrack?
 	local humanoid = self:_getHumanoid()
 	if not humanoid then
@@ -314,18 +313,8 @@ function CruelSun._getCastTrack(self: Controller): AnimationTrack?
 		animator = Instance.new("Animator")
 		animator.Parent = humanoid
 	end
-	if not self.RegisteredCastId then
-		local registered, identifier = pcall(function(): string
-			return KeyframeSequenceProvider:RegisterKeyframeSequence(castKeyframes)
-		end)
-		if not registered then
-			warn("Could not register Cruel Sun animation:", identifier)
-			return nil
-		end
-		self.RegisteredCastId = identifier
-	end
 	local animation = Instance.new("Animation")
-	animation.AnimationId = self.RegisteredCastId
+	animation.AnimationId = CONFIG.Animations.CruelSunCast
 	local loaded, track = pcall(function(): AnimationTrack
 		return animator:LoadAnimation(animation)
 	end)
@@ -779,6 +768,10 @@ function CruelSun.Destroy(self: Controller)
 		self.Input = nil
 	end
 	self:_cleanup(self.ActiveSession)
+	if self.CachedCastTrack then
+		self.CachedCastTrack:Destroy()
+		self.CachedCastTrack = nil
+	end
 end
 
 local ability = CruelSun.new()

@@ -1,7 +1,7 @@
 --[[
 Author(s)    @sillyrelshy
 Date         14/07/26
-Version      2.0.0
+Version      2.1.0
 ]]
 
 
@@ -80,6 +80,7 @@ Preloads the visual, animation, voice, axe, and sound assets used by Cruel Sun.
 function PresentationController.Preload(self: Controller)
 	task.spawn(function()
 		local assets: {Instance} = {}
+		local temporary: {Instance} = {}
 
 		for _, asset in assetsFolder:GetChildren() do
 			if asset:IsA("BasePart")
@@ -97,6 +98,23 @@ function PresentationController.Preload(self: Controller)
 			sound.Volume  = 0
 			sound.Parent  = SoundService
 			table.insert(assets, sound)
+			table.insert(temporary, sound)
+		end
+
+		local animationIds = {
+			CONFIG.Animations.CruelSunCast,
+			CONFIG.Animations.Walk,
+			CONFIG.Animations.Sprint,
+		}
+		for _, animationId in CONFIG.Animations.EscSlash do
+			table.insert(animationIds, animationId)
+		end
+		for _, animationId in animationIds do
+			local animation = Instance.new("Animation")
+			animation.AnimationId = animationId
+			animation.Parent = assetsFolder
+			table.insert(assets, animation)
+			table.insert(temporary, animation)
 		end
 
 		local succeeded, failure = pcall(function()
@@ -107,10 +125,8 @@ function PresentationController.Preload(self: Controller)
 			warn("Cruel Sun asset preload failed:", failure)
 		end
 
-		for _, asset in assets do
-			if asset:IsA("Sound") and asset.Parent == SoundService then
-				asset:Destroy()
-			end
+		for _, asset in temporary do
+			asset:Destroy()
 		end
 	end)
 end
