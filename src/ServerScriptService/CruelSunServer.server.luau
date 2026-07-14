@@ -1,7 +1,7 @@
 --[[
 Author(s)    @sillyrelshy
-Date         13/07/26
-Version      1.1.0
+Date         14/07/26
+Version      1.2.0
 ]]
 
 
@@ -21,6 +21,7 @@ local CHARGE_GRACE       = 0.1
 local IMPACT_GRACE       = 5
 local MAX_CAST_LIFETIME  = 20
 local MAX_ORIGIN_DISTANCE = 75
+local CASTING_ATTRIBUTE  = "CruelSunCasting"
 
 
 type AbilityVariant = {
@@ -43,6 +44,14 @@ type ActiveCast = {
 
 local activeCasts: {[Player]: ActiveCast} = {}
 local nextReadyAt: {[Player]: {[string]: number}} = {}
+
+-- A server-owned attribute lets sibling combat systems reject overlapping
+-- actions without sharing this script's private cast table. The timeout also
+-- clears abandoned Begin requests if a client disconnects from the lifecycle.
+local function clearActiveCast(player: Player)
+	activeCasts[player] = nil
+	player:SetAttribute(CASTING_ATTRIBUTE, false)
+end
 
 
 
@@ -197,6 +206,13 @@ local function beginCast(player: Player, variant: AbilityVariant, now: number)
 		Variant   = variant,
 		StartedAt = now,
 	}
+	player:SetAttribute(CASTING_ATTRIBUTE, true)
+	task.delay(MAX_CAST_LIFETIME, function()
+		local cast = activeCasts[player]
+		if cast and cast.StartedAt == now then
+			clearActiveCast(player)
+		end
+	end)
 end
 
 
@@ -271,7 +287,7 @@ local function resolveImpact(player: Player, position: Vector3, now: number)
 		return
 	end
 
-	activeCasts[player] = nil
+	clearActiveCast(player)
 
 	local maximumFlightTime = CONFIG.MaxRange / CONFIG.ProjectileSpeed + IMPACT_GRACE
 
@@ -330,7 +346,7 @@ hitRemote.OnServerEvent:Connect(function(
 	then
 		resolveImpact(player, valueA, now)
 	elseif action == "Cancel" then
-		activeCasts[player] = nil
+		clearActiveCast(player)
 	end
 end)
 

@@ -1,7 +1,7 @@
 --[[
 Author(s)    @sillyrelshy
 Date         14/07/26
-Version      2.0.0
+Version      2.1.0
 ]]
 
 local Players = game:GetService("Players")
@@ -59,7 +59,10 @@ local function playSlash(index)
 	return true
 end
 local function attack()
-	if humanoid.Health <= 0 then return end
+	-- Cruel Sun freezes an Action4 cast pose and sets MovementLocked before it
+	-- starts charging. Rejecting the input here prevents a melee Action4 track
+	-- from replacing that pose or firing a hit marker during the ability.
+	if humanoid.Health <= 0 or humanoid:GetAttribute("MovementLocked") == true then return end
 	local now = os.clock(); if now < nextAllowedAt then return end
 	if now - lastM1At > CFG.ComboResetWindow then comboIndex = 1
 	else comboIndex += 1; if comboIndex > CFG.ComboMax then comboIndex = 1 end end

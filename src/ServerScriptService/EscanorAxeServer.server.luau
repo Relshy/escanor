@@ -1,3 +1,9 @@
+--[[
+Author(s)    @sillyrelshy
+Date         14/07/26
+Version      1.1.0
+]]
+
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Debris = game:GetService("Debris")
@@ -91,6 +97,7 @@ end)
 -- ================= MELEE DAMAGE (server-authoritative) =================
 local HIT_SIZE = Vector3.new(8, 7, 9)
 local HIT_OFFSET = -4.5
+local CASTING_ATTRIBUTE = "CruelSunCasting"
 local lastHitAt = {}
 
 local hitSoundTemplate = workspace:FindFirstChild("Super Smash Bros. 64 - Moderate Sword Hit Sound")
@@ -109,6 +116,9 @@ local function playHitSound(atPart)
 end
 
 hitRemote.OnServerEvent:Connect(function(player)
+	-- The client guard protects animation state; this server check protects
+	-- damage authority when an altered client fires the M1 remote mid-cast.
+	if player:GetAttribute(CASTING_ATTRIBUTE) == true then return end
 	local character = player.Character
 	if not character then return end
 	local hum = character:FindFirstChildOfClass("Humanoid")
